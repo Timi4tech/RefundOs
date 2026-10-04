@@ -1,0 +1,9 @@
+from enum import Enum
+class RefundStatus(str, Enum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    REQUIRES_REVIEW = "REQUIRES_REVIEW"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"

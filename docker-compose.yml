@@ -1,0 +1,131 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: refunddb
+      POSTGRES_USER: refund
+      POSTGRES_PASSWORD: refund
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U refund -d refunddb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: refund
+      RABBITMQ_DEFAULT_PASS: refund
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  db-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://refund:refund@postgres:5432/refunddb
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+      SEED_ADMIN_NAME: ${SEED_ADMIN_NAME:-Administrator}
+      SEED_DEVELOPER_EMAIL: ${SEED_DEVELOPER_EMAIL:-}
+      SEED_DEVELOPER_PASSWORD: ${SEED_DEVELOPER_PASSWORD:-}
+      SEED_DEVELOPER_NAME: ${SEED_DEVELOPER_NAME:-Developer}
+    volumes:
+      - db_init_state:/state
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >-
+        set -e;
+        python3 scripts/init_db.py;
+        if [ ! -f /state/demo_seeded ]; then
+          PGPASSWORD=refund psql -h postgres -U refund -d refunddb -v ON_ERROR_STOP=1 -f database/demo_seed.sql;
+          date -u > /state/demo_seeded;
+        fi;
+        python3 scripts/seed_roles.py
+    restart: "no"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://refund:refund@postgres:5432/refunddb
+      RABBITMQ_URL: amqp://refund:refund@rabbitmq:5672/
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-replace-this-with-a-long-random-secret}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
+      REFUND_WORKER_TIMEOUT_SECONDS: ${REFUND_WORKER_TIMEOUT_SECONDS:-30}
+      REFUND_WINDOW_DAYS: ${REFUND_WINDOW_DAYS:-30}
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    command: ["python3", "worker/main.py"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://refund:refund@postgres:5432/refunddb
+      RABBITMQ_URL: amqp://refund:refund@rabbitmq:5672/
+      REFUND_WINDOW_DAYS: ${REFUND_WINDOW_DAYS:-30}
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api/v1}
+    environment:
+      PORT: 3000
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  db_init_state:
